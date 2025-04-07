@@ -2,6 +2,15 @@ import os
 import struct
 import json
 import glob
+import random
+import time
+import sqlite3
+import zstandard as zstd
+
+# ----------------------------
+# Global Valid Versions
+# ----------------------------
+VALID_VERSIONS = {"Version 1.04", "버전 1.04", "版本 1.04", "Версия 1.04", "Versión 1.04", "Versione 1.04"}
 
 # ----------------------------
 # Custom RNG Replication (C++ ADC-based)
@@ -33,19 +42,14 @@ def random_value(seed_array):
     carry = 0
     ax, carry = adc(seed_array[5], seed_array[4], carry)
     seed_array[4] = ax
-
     ax, carry = adc(ax, seed_array[3], carry)
     seed_array[3] = ax
-
     ax, carry = adc(ax, seed_array[2], carry)
     seed_array[2] = ax
-
     ax, carry = adc(ax, seed_array[1], carry)
     seed_array[1] = ax
-
     ax, carry = adc(ax, seed_array[0], carry)
     seed_array[0] = ax
-
     seed_array[5] = (seed_array[5] + 1) & 0xFFFFFFFF
     if seed_array[5] == 0:
         seed_array[4] = (seed_array[4] + 1) & 0xFFFFFFFF
@@ -67,7 +71,7 @@ def get_game_logic_random_value(lo, hi):
     return (random_value(GAME_LOGIC_SEED) % delta) + lo
 
 # ----------------------------
-# Template and Color Setup (updated names)
+# Template and Color Setup
 # ----------------------------
 AVAILABLE_TEMPLATES = {
     1: "Observer",
@@ -223,7 +227,7 @@ def read_ascii_string(file):
         if byte == b'\x00' or not byte:
             break
         bytes_read.extend(byte)
-    return bytes_read.decode('ascii')
+    return bytes_read.decode('utf-8', errors='replace')
 
 def read_unicode_string(file):
     chars = bytearray()
@@ -239,22 +243,18 @@ def parse_game_message(f):
     if not frame_data or len(frame_data) < 4:
         return None
     frame = struct.unpack('<I', frame_data)[0]
-
     msg_type = struct.unpack('<i', f.read(4))[0]
     player_index = struct.unpack('<i', f.read(4))[0]
     msg_text = MESSAGE_TYPE_MAP.get(msg_type, f"Unknown ({msg_type})")
-
     num_types_data = f.read(1)
     if not num_types_data or len(num_types_data) < 1:
         return None
     num_types = struct.unpack('<B', num_types_data)[0]
-
     arg_types = []
     for _ in range(num_types):
         arg_type = struct.unpack('<B', f.read(1))[0]
         arg_count = struct.unpack('<B', f.read(1))[0]
         arg_types.append((arg_type, arg_count))
-
     args = []
     for arg_type, arg_count in arg_types:
         fmt_size = ARG_TYPE_MAP.get(arg_type)
@@ -266,8 +266,7 @@ def parse_game_message(f):
             if len(arg_data) < size:
                 raise ValueError("Unexpected end of file while reading arguments")
             arg = struct.unpack(f'<{fmt}', arg_data)
-            args.append(arg[0] if len(arg)==1 else arg)
-
+            args.append(arg[0] if len(arg) == 1 else arg)
     return {
         "frame": frame,
         "type": msg_type,
@@ -279,18 +278,15 @@ def parse_game_message(f):
 def parse_rep_file(file_path):
     with open(file_path, 'rb') as f:
         file_size = os.fstat(f.fileno()).st_size
-
         identifier = f.read(6).decode('ascii')
         if identifier != "GENREP":
             raise ValueError("Not a valid .rep file: missing GENREP identifier")
-
         start_time = struct.unpack('<I', f.read(4))[0]
         end_time = struct.unpack('<I', f.read(4))[0]
         frame_duration = struct.unpack('<I', f.read(4))[0]
         desync_game = struct.unpack('<B', f.read(1))[0]
         quit_early = struct.unpack('<B', f.read(1))[0]
         player_discons = [struct.unpack('<B', f.read(1))[0] for _ in range(MAX_SLOTS)]
-
         replay_name = read_unicode_string(f)
         system_time = f.read(16)
         version_string = read_unicode_string(f)
@@ -301,12 +297,10 @@ def parse_rep_file(file_path):
         game_options = read_ascii_string(f)
         local_player_index_str = read_ascii_string(f)
         local_player_index = int(local_player_index_str) if local_player_index_str else -1
-
         difficulty = struct.unpack('<i', f.read(4))[0]
         original_game_mode = struct.unpack('<i', f.read(4))[0]
         rank_points = struct.unpack('<i', f.read(4))[0]
         max_fps = struct.unpack('<i', f.read(4))[0]
-
         header = {
             'start_time': start_time,
             'end_time': end_time,
@@ -328,7 +322,6 @@ def parse_rep_file(file_path):
             'rank_points': rank_points,
             'max_fps': max_fps
         }
-
         messages = []
         msg_index = 0
         while f.tell() + 13 <= file_size:
@@ -341,7 +334,6 @@ def parse_rep_file(file_path):
             except Exception as e:
                 print(f"Error parsing message {msg_index} in {file_path}: {e}")
                 break
-
         return {'header': header, 'messages': messages}
 
 # ----------------------------
@@ -365,13 +357,21 @@ def parse_player_info(game_options):
                 if not entry:
                     slot += 1
                     continue
-                info = {"slot": slot}  # renamed SlotOrder to slot
-                # We'll remove the original "Slot" key later
+                info = {"slot": slot}
                 if entry[0] == "H":
                     tokens = entry.split(",")
                     name = tokens[0][1:] if tokens[0] else ""
+                    try:
+                        orig_color = int(tokens[-5]) if len(tokens) >= 5 else -1
+                    except:
+                        orig_color = -1
+                    try:
+                        orig_template = int(tokens[-4]) if len(tokens) >= 5 else -1
+                    except:
+                        orig_template = -1
+                    info["original_color"] = orig_color
+                    info["original_template"] = orig_template
                     if len(tokens) >= 5:
-                        # For human players, use the last 5 tokens as before.
                         color = tokens[-5]
                         template = tokens[-4]
                         position = tokens[-3]
@@ -390,17 +390,20 @@ def parse_player_info(game_options):
                     player_index_counter += 1
                 elif entry[0] == "C":
                     tokens = entry.split(",")
-                    # The first token starts with 'C'. Its second character indicates difficulty.
+                    try:
+                        orig_color = int(tokens[1]) if len(tokens) >= 5 else -1
+                    except:
+                        orig_color = -1
+                    try:
+                        orig_template = int(tokens[2]) if len(tokens) >= 5 else -1
+                    except:
+                        orig_template = -1
+                    info["original_color"] = orig_color
+                    info["original_template"] = orig_template
                     ai_char = tokens[0][1] if len(tokens[0]) > 1 else ""
                     diff_map = {"E": "Easy", "M": "Medium", "H": "Brutal"}
                     ai_type = diff_map.get(ai_char, "CPU")
                     if len(tokens) >= 5:
-                        # For AI, assume the following order:
-                        # Token 0: AI marker (e.g., "CH")
-                        # Token 1: Color (e.g., "1" meaning red)
-                        # Token 2: Template (e.g., "4" meaning GLA)
-                        # Token 3: Position
-                        # Token 4: Team
                         color = tokens[1]
                         template = tokens[2]
                         position = tokens[3]
@@ -431,6 +434,14 @@ def parse_player_info(game_options):
                 slot += 1
     return players
 
+def get_map_name(game_options):
+    for part in game_options.split(";"):
+        if part.startswith("M="):
+            map_str = part[2:].strip()
+            if "/" in map_str:
+                map_str = map_str.split("/")[-1].strip()
+            return map_str
+    return ""
 
 def extract_seed_from_options(game_options):
     for pair in game_options.split(";"):
@@ -448,23 +459,12 @@ def assign_random_template_and_color(player_info, available_templates, available
     taken_colors = set()
     if seed_value is None:
         seed_value = GAME_LOGIC_SEED[0]
-
-    # Pre-populate taken_colors with players that already chose a color (not "-1")
     for player in player_info:
         if player["Type"] in ("Human",) or player["Type"].startswith("AI"):
-            col_val = player.get("Color", "-1")
-            if col_val != "-1":
-                try:
-                    color_index = int(col_val)
-                    if color_index in available_colors:
-                        taken_colors.add(color_index)
-                except ValueError:
-                    pass
-
-    for player in player_info:
-        # Process only Human or AI slots.
-        if player["Type"] in ("Human",) or player["Type"].startswith("AI"):
-            # Template assignment:
+            original_template = player.get("original_template", -1)
+            original_color = player.get("original_color", -1)
+            player["original_template"] = original_template
+            player["original_color"] = original_color
             tpl_val = player.get("Template", "-1")
             if tpl_val == "-1":
                 silly = seed_value % 7
@@ -473,13 +473,11 @@ def assign_random_template_and_color(player_info, available_templates, available
                 idx = get_game_logic_random_value(0, 1000) % len(valid_templates)
                 template_index = valid_templates[idx]
             elif tpl_val == "-2":
-                # If template value is -2, assign Observer template.
                 template_index = 1
             else:
                 try:
                     template_index = int(tpl_val)
                     if template_index not in available_templates:
-                        # If not valid, assign random.
                         silly = seed_value % 7
                         for _ in range(silly):
                             _ = get_game_logic_random_value(0, 1)
@@ -491,14 +489,10 @@ def assign_random_template_and_color(player_info, available_templates, available
                         _ = get_game_logic_random_value(0, 1)
                     idx = get_game_logic_random_value(0, 1000) % len(valid_templates)
                     template_index = valid_templates[idx]
-            # Save as separate keys.
             player["template_index"] = template_index
             player["template"] = available_templates.get(template_index, "Unknown")
-            # Remove the old Template key.
             if "Template" in player:
                 del player["Template"]
-
-            # Color assignment:
             col_val = player.get("Color", "-1")
             if col_val == "-1":
                 color_index = get_game_logic_random_value(0, len(available_colors)-1)
@@ -509,7 +503,6 @@ def assign_random_template_and_color(player_info, available_templates, available
                     color_index = int(col_val)
                     if color_index not in available_colors:
                         color_index = get_game_logic_random_value(0, len(available_colors)-1)
-                    # Even if already added, mark explicitly assigned color as taken.
                 except ValueError:
                     color_index = get_game_logic_random_value(0, len(available_colors)-1)
             taken_colors.add(color_index)
@@ -517,8 +510,6 @@ def assign_random_template_and_color(player_info, available_templates, available
             player["color"] = available_colors.get(color_index, "Unknown")
             if "Color" in player:
                 del player["Color"]
-
-            # Convert position and team to integers if possible.
             pos_val = player.get("Position", "")
             team_val = player.get("Team", "")
             try:
@@ -529,73 +520,174 @@ def assign_random_template_and_color(player_info, available_templates, available
                 player["Team"] = int(team_val)
             except (ValueError, TypeError):
                 player["Team"] = None
-
-        # For non-player slots, remove unused keys.
         if "Template" in player:
             del player["Template"]
         if "Color" in player:
             del player["Color"]
-        # Remove the original Slot field if it exists.
         if "Slot" in player:
             del player["Slot"]
     return player_info
 
-
-
 # ----------------------------
-# Process .rep Files and Output JSON
+# Process a Single Replay File
 # ----------------------------
 def process_replay_file(rep_file_path):
     parsed_data = parse_rep_file(rep_file_path)
     header = parsed_data['header']
     messages = parsed_data['messages']
-    
-    # Parse and assign player info
-    player_info = parse_player_info(header.get('game_options', ""))
-    seed_from_header = extract_seed_from_options(header.get('game_options', ""))
+    version_str = header.get("version_string", "").strip()
+    if version_str not in VALID_VERSIONS:
+        print(f"Skipping {rep_file_path} due to unsupported version: {version_str}")
+        return None, None
+    game_options = header.get('game_options', "")
+    original_player_info = parse_player_info(game_options)
+    map_name = get_map_name(game_options)
+    seed_from_header = extract_seed_from_options(game_options)
     if seed_from_header is not None:
         init_random(seed_from_header)
     else:
         init_random(0)
-    player_info = assign_random_template_and_color(player_info, AVAILABLE_TEMPLATES, AVAILABLE_COLORS, seed_value=seed_from_header)
-    
-    # Determine local player info:
+    processed_player_info = assign_random_template_and_color(
+        original_player_info.copy(), AVAILABLE_TEMPLATES, AVAILABLE_COLORS, seed_value=seed_from_header
+    )
     local_slot = header.get('local_player_index', -1)
     local_player_index = None
-    for p in player_info:
+    for p in processed_player_info:
         if p.get("slot") == local_slot:
             local_player_index = p.get("PlayerIndex")
             break
     header["Local_Player_Index"] = local_player_index if local_player_index is not None else "Not found"
-    
-    # Combine all data into a dictionary
+    header["map"] = map_name
     data = {
         "header": header,
-        "player_info": player_info,
+        "player_info": processed_player_info,
         "messages": messages
     }
-    return data
+    dup_key = (seed_from_header, json.dumps(original_player_info, sort_keys=True), map_name)
+    frame_duration = header.get("frame_duration", 0)
+    record = {
+        "source": rep_file_path,
+        "map_name": map_name,
+        "seed": seed_from_header,
+        "player_info": original_player_info,
+        "frame_duration": frame_duration,
+        "data": data
+    }
+    return record, dup_key
 
+# ----------------------------
+# SQLite Database Setup for Duplicate Tracking
+# ----------------------------
+DB_FILE = "duplicates.db"
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS duplicates (
+            dup_key TEXT PRIMARY KEY,
+            source TEXT,
+            frame_duration INTEGER,
+            output_file TEXT
+        )
+    """)
+    conn.commit()
+    return conn
+
+# ----------------------------
+# Write Parsed Replay to Zstandard Compressed File
+# ----------------------------
+def write_parsed_file(data, source):
+    base = os.path.splitext(os.path.basename(source))[0]
+    output_file = os.path.join("parsed", base + ".json.zst")
+    counter = 1
+    while os.path.exists(output_file):
+        output_file = os.path.join("parsed", f"{base}_{counter}.json.zst")
+        counter += 1
+    json_str = json.dumps(data, indent=4)
+    cctx = zstd.ZstdCompressor(level=3)
+    compressed = cctx.compress(json_str.encode("utf-8"))
+    with open(output_file, "wb") as f:
+        f.write(compressed)
+    print(f"Output written to {output_file}")
+    return output_file
+
+# ----------------------------
+# Main Processing Function
+# ----------------------------
 def main():
-    rep_files = glob.glob("*.rep")
+    parse_all = True  # Change to False to limit processing.
+    max_files = 100   # Maximum files if not processing all.
+    os.makedirs("parsed", exist_ok=True)
+    if os.path.exists(DB_FILE):
+        os.remove(DB_FILE)
+        print(f"Deleted existing database file: {DB_FILE}")
+    conn = init_db()
+    cursor = conn.cursor()
+    rep_files = glob.glob("**/*.rep", recursive=True)
     if not rep_files:
-        print("No .rep files found in the current directory.")
+        print("No .rep files found.")
         return
-
-    output_folder = "parsed"
-    os.makedirs(output_folder, exist_ok=True)
-
-    for rep_file in rep_files:
+    filtered_files = [f for f in rep_files if os.path.basename(f).split('_')[1] == "1v1"]
+    total_files = len(filtered_files)
+    if total_files == 0:
+        print("No 1v1 .rep files found.")
+        return
+    print(f"Found {total_files} 1v1 replay files. Beginning processing...")
+    skipped_low_duration = 0
+    skipped_duplicates = 0
+    skipped_versions = 0
+    processed = 0
+    for rep_file in filtered_files:
+        if not parse_all and processed >= max_files:
+            print(f"Reached max_files limit of {max_files}.")
+            break
+        processed += 1
+        print(f"Processing file {processed}/{total_files}: {rep_file}")
         try:
-            print(f"Processing {rep_file}...")
-            data = process_replay_file(rep_file)
-            base_name = os.path.splitext(os.path.basename(rep_file))[0]
-            output_file = os.path.join(output_folder, base_name + ".json")
-            with open(output_file, 'w', encoding='utf-8') as out:
-                json.dump(data, out, indent=4)
-            print(f"Output written to {output_file}")
+            record, dup_key = process_replay_file(rep_file)
+            if record is None:
+                skipped_versions += 1
+                continue
+            if record["frame_duration"] < 600:
+                skipped_low_duration += 1
+                print(f"Skipping {rep_file} due to low duration ({record['frame_duration']} frames).")
+                continue
+            dup_key_str = json.dumps(dup_key, sort_keys=True)
+            source = record.get("source", "unknown")
+            frame_duration = record.get("frame_duration", 0)
+            cursor.execute("SELECT frame_duration, source, output_file FROM duplicates WHERE dup_key = ?", (dup_key_str,))
+            row = cursor.fetchone()
+            if row:
+                existing_duration = row[0]
+                if frame_duration > existing_duration:
+                    old_output_file = row[2]
+                    if os.path.exists(old_output_file):
+                        os.remove(old_output_file)
+                        print(f"Removed older replay file: {old_output_file}")
+                    cursor.execute("UPDATE duplicates SET source = ?, frame_duration = ?, output_file = ? WHERE dup_key = ?",
+                                   (source, frame_duration, write_parsed_file(record["data"], source), dup_key_str))
+                    conn.commit()
+                    print(f"Duplicate for {source} replaced because new replay has higher duration ({frame_duration} vs {existing_duration}).")
+                    skipped_duplicates += 1
+                else:
+                    skipped_duplicates += 1
+                    print(f"Duplicate found for {source}. Skipping this replay (duration {frame_duration} vs {existing_duration}).")
+            else:
+                output_file = write_parsed_file(record["data"], source)
+                cursor.execute("INSERT INTO duplicates (dup_key, source, frame_duration, output_file) VALUES (?,?,?,?)",
+                               (dup_key_str, source, frame_duration, output_file))
+                conn.commit()
         except Exception as e:
             print(f"Error processing {rep_file}: {e}")
+        time.sleep(0.005)
+    conn.close()
+    print("Finished processing.")
+    print(f"Replays skipped due to low duration: {skipped_low_duration}")
+    print(f"Replays skipped as duplicates: {skipped_duplicates}")
+    print(f"Replays excluded due to unsupported version: {skipped_versions}")
+    if os.path.exists(DB_FILE):
+        os.remove(DB_FILE)
+        print(f"Deleted duplicates database file: {DB_FILE}")
 
 if __name__ == "__main__":
     main()
